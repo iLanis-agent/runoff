@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runoff - group decisions without the 40-message thread</title>
+<style>
+  :root { --bg:#151118; --panel:#1d1822; --line:#342a3c; --text:#f7f3fa; --dim:#ab9fb8; --accent:#d1a3ff; --good:#8be0a4; --bad:#ff8f7a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:26px 14px 44px; }
+  h1 { font-size:30px; }
+  .sub { color:var(--dim); margin:6px 0 18px; font-size:14px; text-align:center; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; width:min(620px, 94vw); margin-bottom:14px; }
+  .card h2 { font-size:15px; margin-bottom:10px; }
+  .row { display:flex; gap:10px; align-items:end; }
+  input { background:#120e16; border:1px solid var(--line); border-radius:8px; color:var(--text); padding:9px 12px; font-size:14px; flex:1; }
+  label { color:var(--dim); font-size:12px; display:block; margin-bottom:4px; }
+  button { background:var(--accent); color:#151118; border:none; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:700; cursor:pointer; }
+  .ghost { background:#3a3242; color:var(--text); }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .chip { background:#120e16; border:1px solid var(--line); border-radius:20px; padding:6px 14px; font-size:14px; display:inline-flex; align-items:center; gap:8px; }
+  .chip .x { color:var(--dim); cursor:pointer; }
+  .chip .x:hover { color:var(--bad); }
+  .rank-opt { display:block; width:100%; text-align:left; background:#120e16; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-top:6px; font-size:15px; color:var(--text); cursor:pointer; }
+  .rank-opt:hover { border-color:var(--accent); }
+  .rank-opt .n { display:inline-block; min-width:26px; font-weight:900; color:var(--accent); }
+  .rank-opt.picked { opacity:.45; pointer-events:none; }
+  .ballot-summary { background:#120e16; border-radius:8px; padding:10px 12px; margin-top:10px; font-size:13px; color:var(--dim); min-height:38px; }
+  .round { background:#120e16; border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:8px; }
+  .round h3 { font-size:13px; margin-bottom:8px; color:var(--dim); }
+  .tally { margin-top:4px; font-size:14px; }
+  .tally .bar { height:8px; border-radius:4px; background:var(--accent); margin-top:3px; }
+  .tally .out .bar { background:#4a3f55; }
+  .tally .out .nm { color:var(--dim); text-decoration:line-through; }
+  #winner-card { text-align:center; display:none; }
+  #winner-card .win { font-size:32px; font-weight:900; color:var(--good); }
+  #winner-card .why { color:var(--dim); margin-top:8px; font-size:14px; line-height:1.6; }
+  .foot { margin-top:14px; color:var(--dim); font-size:13px; }
+  a { color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<h1>Runoff</h1>
+<div class="sub">everyone ranks the options once. the math finds what the group can live with.</div>
+
+<div class="card" id="step-options">
+  <h2>1. What's on the table?</h2>
+  <div class="row">
+    <input id="opt-name" placeholder="e.g. Thai place downtown">
+    <button id="add-opt">Add option</button>
+  </div>
+  <div class="chips" id="options"></div>
+</div>
+
+<div class="card" id="step-ballots">
+  <h2>2. Pass the phone - <span id="voter-n">voter 1</span></h2>
+  <div style="color:var(--dim);font-size:13px;margin-bottom:6px">Tap in order of preference. Skip what you wouldn't pick. Submit when done.</div>
+  <div id="rank-list"></div>
+  <div class="ballot-summary" id="ballot-summary">Your ranking: (nothing yet)</div>
+  <div class="row" style="margin-top:10px">
+    <button id="submit-ballot">Submit ballot</button>
+    <button class="ghost" id="clear-ballot">Clear</button>
+    <button class="ghost" id="to-runoff">Done voting &rarr;</button>
+  </div>
+</div>
+
+<div class="card" id="step-results">
+  <h2>3. The runoff</h2>
+  <div id="rounds"><div style="color:var(--dim);font-size:14px">Collect at least 1 ballot and 2 options.</div></div>
+</div>
+
+<div class="card" id="winner-card">
+  <div class="win" id="winner-name"></div>
+  <div class="why" id="winner-why"></div>
+  <button class="ghost" id="reset" style="margin-top:12px">Start a new vote</button>
+</div>
+
+<div class="foot"><a href="index.html">&larr; about</a></div>
+
+<script src="engine.js?v=1"></script>
+<script>
+(function () {
+  var options = [];   // [{id, name}]
+  var ballots = [];   // [[id,...], ...]
+  var ranking = [];   // current voter's picks
+  var result = null;
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  function renderOptions() {
+    var el = document.getElementById('options');
+    el.innerHTML = '';
+    options.forEach(function (o) {
+      var c = document.createElement('span');
+      c.className = 'chip';
+      c.innerHTML = esc(o.name) + ' <span class="x" data-id="' + o.id + '">&times;</span>';
+      el.appendChild(c);
+    });
+    el.querySelectorAll('.x').forEach(function (x) {
+      x.addEventListener('click', function () {
+        var id = x.getAttribute('data-id');
+        options = options.filter(function (o) { return o.id !== id; });
+        ranking = ranking.filter(function (r) { return r !== id; });
+        renderOptions(); renderBallot();
+      });
+    });
+    renderBallot();
+  }
+
+  function renderBallot() {
+    var list = document.getElementById('rank-list');
+    list.innerHTML = '';
+    options.forEach(function (o) {
+      var pickedAt = ranking.indexOf(o.id);
+      var b = document.createElement('button');
+      b.className = 'rank-opt' + (pickedAt >= 0 ? ' picked' : '');
+      b.innerHTML = '<span class="n">' + (pickedAt >= 0 ? (pickedAt + 1) : '') + '</span>' + esc(o.name);
+      b.addEventListener('click', function () {
+        ranking.push(o.id);
+        renderBallot();
+      });
+      list.appendChild(b);
+    });
+    document.getElementById('voter-n').textContent = 'voter ' + (ballots.length + 1);
+    document.getElementById('ballot-summary').textContent = 'Your ranking: ' + (ranking.length
+      ? ranking.map(function (id, i) { var o = options.filter(function (x) { return x.id === id; })[0]; return (i + 1) + '. ' + (o ? o.name : '?'); }).join('  ')
+      : '(nothing yet)');
+  }
+
+  document.getElementById('add-opt').addEventListener('click', function () {
+    var name = document.getElementById('opt-name').value.trim();
+    if (!name) return;
+    options.push({ id: 'o' + Date.now() + Math.floor(Math.random() * 1000), name: name });
+    document.getElementById('opt-name').value = '';
+    renderOptions();
+  });
+
+  document.getElementById('submit-ballot').addEventListener('click', function () {
+    if (!ranking.length) return;
+    ballots.push(ranking.slice());
+    ranking = [];
+    renderBallot();
+  });
+  document.getElementById('clear-ballot').addEventListener('click', function () { ranking = []; renderBallot(); });
+  document.getElementById('to-runoff').addEventListener('click', runTally);
+
+  function runTally() {
+    if (ranking.length) { ballots.push(ranking.slice()); ranking = []; }
+    if (options.length < 2 || !ballots.length) return;
+    result = Runoff.tally(options.map(function (o) { return o.id; }), ballots);
+    renderResults();
+  }
+
+  function renderResults() {
+    var el = document.getElementById('rounds');
+    el.innerHTML = '';
+    result.rounds.forEach(function (r, ri) {
+      var div = document.createElement('div');
+      div.className = 'round';
+      var max = Math.max.apply(null, Object.keys(r.counts).map(function (k) { return r.counts[k]; }).concat([1]));
+      var html = '<h3>Round ' + (ri + 1) + (r.majority ? ' - majority reached' : '') + '</h3>';
+      options.forEach(function (o) {
+        if (!(o.id in r.counts)) return;
+        var out = r.eliminated.indexOf(o.id) >= 0;
+        html += '<div class="tally' + (out ? ' out' : '') + '"><span class="nm">' + esc(o.name) + '</span> - ' + r.counts[o.id] +
+          '<div class="bar" style="width:' + Math.max(2, r.counts[o.id] / max * 100) + '%"></div></div>';
+      });
+      if (r.eliminated.length) {
+        html += '<div style="color:var(--dim);font-size:12px;margin-top:8px">eliminated: ' + r.eliminated.map(function (id) {
+          var o = options.filter(function (x) { return x.id === id; })[0];
+          return esc(o ? o.name : id);
+        }).join(', ') + ' - their votes move to each ballot\'s next pick</div>';
+      }
+      div.innerHTML = html;
+      el.appendChild(div);
+    });
+
+    var card = document.getElementById('winner-card');
+    var nameEl = document.getElementById('winner-name');
+    var whyEl = document.getElementById('winner-why');
+    if (result.winner) {
+      var w = options.filter(function (o) { return o.id === result.winner; })[0];
+      nameEl.textContent = w.name;
+      whyEl.innerHTML = 'wins after ' + result.rounds.length + ' round' + (result.rounds.length === 1 ? '' : 's') +
+        ' across ' + ballots.length + ' ballot' + (ballots.length === 1 ? '' : 's') +
+        (result.exhausted ? ' (' + result.exhausted + ' ballot' + (result.exhausted === 1 ? '' : 's') + ' ran out of ranked options)' : '') + '.';
+    } else {
+      nameEl.textContent = 'Dead tie';
+      nameEl.style.color = 'var(--bad)';
+      whyEl.innerHTML = 'No option reached a majority. Flip a coin or drop an option and re-vote.';
+    }
+    card.style.display = '';
+  }
+
+  document.getElementById('reset').addEventListener('click', function () {
+    options = []; ballots = []; ranking = []; result = null;
+    document.getElementById('winner-card').style.display = 'none';
+    document.getElementById('winner-name').style.color = '';
+    document.getElementById('rounds').innerHTML = '<div style="color:var(--dim);font-size:14px">Collect at least 1 ballot and 2 options.</div>';
+    renderOptions();
+  });
+
+  // test hook
+  window.__ro = {
+    reset: function () { document.getElementById('reset').click(); },
+    addOption: function (name) { document.getElementById('opt-name').value = name; document.getElementById('add-opt').click(); },
+    vote: function (namesInOrder) {
+      ranking = namesInOrder.map(function (n) {
+        var o = options.filter(function (x) { return x.name === n; })[0];
+        return o ? o.id : n;
+      }).filter(Boolean);
+      document.getElementById('submit-ballot').click();
+    },
+    run: runTally,
+    read: function () {
+      return {
+        winner: document.getElementById('winner-name').textContent,
+        why: document.getElementById('winner-why').textContent,
+        rounds: document.querySelectorAll('#rounds .round').length,
+        visible: document.getElementById('winner-card').style.display !== 'none'
+      };
+    }
+  };
+
+  renderOptions();
+})();
+</script>
+</body>
+</html>
